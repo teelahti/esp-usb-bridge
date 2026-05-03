@@ -6,8 +6,10 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <inttypes.h>
 
+#include "sdkconfig.h"
 #include "serial_bridge.h"
 #include "serial_handler.h"
 #include "tusb_config.h"
@@ -20,6 +22,7 @@
 #include "esp_timer.h"
 #include "util.h"
 #include "debug_probe.h"
+#include "driver/uart.h"
 
 #define USB_SEND_RINGBUFFER_SIZE (2 * 1024)
 
@@ -35,7 +38,7 @@ static void transport_data_received_callback(const uint8_t *data, size_t len)
 {
     // With the new API, the callback is only called when bridge mode is active
     // (i.e., when flashing is not in progress), so we don't need to check mode
-    ESP_LOGD(TAG, "Transport -> USB ringbuffer (%zu bytes)", len);
+    ESP_LOGI(TAG, "Transport -> USB ringbuffer (%zu bytes)", len);
     ESP_LOG_BUFFER_HEXDUMP("Transport -> USB", data, len, ESP_LOG_DEBUG);
 
     // Send received transport data to USB CDC
@@ -80,7 +83,7 @@ static void usb_sender_task(void *pvParameters)
                     ESP_LOGV(TAG, "usb tx timeout");
                     break;
                 }
-                ESP_LOGD(TAG, "USB ringbuffer -> USB CDC (%d bytes)", wr_len);
+                ESP_LOGI(TAG, "USB ringbuffer -> USB CDC (%d bytes)", wr_len);
                 transferred += wr_len;
                 to_send -= wr_len;
             }
@@ -105,13 +108,48 @@ void tud_cdc_tx_complete_cb(const uint8_t itf)
     xSemaphoreGive(usb_tx_done);
 }
 
+// Magic sequence to query bridge status: "EUB?" (0x45 0x55 0x42 0x3F)
+#define DIAG_MAGIC "EUB?"
+#define DIAG_MAGIC_LEN 4
+
+static void send_diag_response(void)
+{
+    uint32_t current_baud = 0;
+    uart_get_baudrate(UART_NUM_1, &current_baud);
+
+    char resp[256];
+    int len = snprintf(resp, sizeof(resp),
+        "\r\n[EUB DIAG] is_flashing=%d, uart_port=%d\r\n"
+        "[EUB DIAG] GPIO: TXD=%d, RXD=%d, RST=%d, BOOT=%d\r\n"
+        "[EUB DIAG] Current baudrate=%" PRIu32 "\r\n",
+        serial_handler_is_flashing(),
+        UART_NUM_1,
+        CONFIG_SERIAL_HANDLER_GPIO_TXD,
+        CONFIG_SERIAL_HANDLER_GPIO_RXD,
+        CONFIG_SERIAL_HANDLER_GPIO_RST,
+        CONFIG_SERIAL_HANDLER_GPIO_BOOT,
+        current_baud);
+
+    // Write directly to CDC (bypass UART path)
+    tud_cdc_write(resp, len);
+    tud_cdc_write_flush();
+    ESP_LOGI(TAG, "Diagnostic response sent (%d bytes)", len);
+}
+
 void tud_cdc_rx_cb(const uint8_t itf)
 {
     uint8_t buf[CFG_TUD_CDC_RX_BUFSIZE];
 
     const uint32_t rx_size = tud_cdc_n_read(itf, buf, CFG_TUD_CDC_RX_BUFSIZE);
     if (rx_size > 0) {
-        ESP_LOGD(TAG, "USB CDC -> Transport (%" PRIu32 " bytes)", rx_size);
+        // Check for diagnostic magic sequence
+        if (rx_size >= DIAG_MAGIC_LEN && memcmp(buf, DIAG_MAGIC, DIAG_MAGIC_LEN) == 0) {
+            ESP_LOGI(TAG, "Diagnostic query received");
+            send_diag_response();
+            return;
+        }
+
+        ESP_LOGI(TAG, "USB CDC -> Transport (%" PRIu32 " bytes)", rx_size);
         ESP_LOG_BUFFER_HEXDUMP("USB CDC -> Transport", buf, rx_size, ESP_LOG_DEBUG);
 
         // Send to transport (could be UART, SPI, I2C, etc.)

@@ -103,10 +103,14 @@ static void uart_event_task(void *pvParameters)
                     size_t buffered_len;
                     uart_get_buffered_data_len(SLAVE_UART_NUM, &buffered_len);
                     const int read = uart_read_bytes(SLAVE_UART_NUM, dtmp, MIN(buffered_len, SLAVE_UART_BUF_SIZE), portMAX_DELAY);
-                    ESP_LOGD(TAG, "UART -> Bridge Callback (%d bytes)", read);
+                    ESP_LOGI(TAG, "UART -> Bridge Callback (%d bytes)", read);
                     ESP_LOG_BUFFER_HEXDUMP("UART RX", dtmp, read, ESP_LOG_DEBUG);
 
                     s_transport.data_callback(dtmp, read);
+                } else {
+                    ESP_LOGW(TAG, "UART data DROPPED: is_flashing=%d, callback=%s",
+                             atomic_load(&s_transport.is_flashing),
+                             s_transport.data_callback ? "set" : "NULL");
                 }
                 // Note: When flashing, ESP loader will read data directly from UART
                 break;
@@ -171,6 +175,19 @@ static esp_err_t init_uart_transport(void)
     }
 }
 
+// Periodic diagnostic task - logs bridge state every 10 seconds
+static void diagnostic_task(void *pvParameters)
+{
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(10000));
+        ESP_LOGI(TAG, "[DIAG] is_flashing=%d, callback=%s, type=%d, initialized=%d",
+                 atomic_load(&s_transport.is_flashing),
+                 s_transport.data_callback ? "set" : "NULL",
+                 s_transport.type,
+                 s_transport.is_initialized);
+    }
+}
+
 esp_err_t serial_handler_init(transport_type_t type)
 {
     if (s_transport.is_initialized) {
@@ -202,6 +219,10 @@ esp_err_t serial_handler_init(transport_type_t type)
 
         s_transport.is_initialized = true;
         ESP_LOGI(TAG, "Comm handler initialized for type %d", type);
+
+        // Start periodic diagnostic task
+        xTaskCreate(diagnostic_task, "diag_task", KB(2), NULL, 1, NULL);
+        ESP_LOGI(TAG, "Diagnostic task started (status every 10s)");
     }
 
     return ret;
@@ -236,7 +257,7 @@ esp_err_t serial_handler_send_data(const uint8_t *data, size_t len)
         return ESP_ERR_INVALID_STATE;
     }
 
-    ESP_LOGD(TAG, "Sending %zu bytes", len);
+    ESP_LOGI(TAG, "Sending %zu bytes", len);
     ESP_LOG_BUFFER_HEXDUMP("UART TX", data, len, ESP_LOG_DEBUG);
 
     switch (s_transport.type) {
