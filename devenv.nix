@@ -14,8 +14,8 @@ in
 
   enterShell = ''
     echo "ESP-IDF $(idf.py --version) dev environment ready"
-    echo "  idf.py build       - build the project"
-    echo "  idf.py flash       - flash to device"
-    echo "  picocom /dev/ttyX  - serial monitor"
+    echo "  idf.py build                                    - build the project"
+    echo "  idf.py -p /dev/ttyACM0 flash monitor            - flash to device"
+    echo "  picocom -b 115200 /dev/ttyUSB0 --imap lfcrlf    - serial monitor"
   '';
 }
