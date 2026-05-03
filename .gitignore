@@ -3,3 +3,11 @@ managed_components/
 sdkconfig
 sdkconfig.old
 dependencies.lock
+
+# devenv
+.devenv*
+devenv.local.nix
+devenv.lock
+
+# direnv
+.direnv
